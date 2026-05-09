@@ -23,6 +23,11 @@ export default function App() {
   const [showHistory, setShowHistory] = useState(false);
   const [customPrompt, setCustomPrompt] = useState("");
   const [scores, setScores] = useState({});
+  const [batchMode, setBatchMode] = useState(false);
+  const [batchDests, setBatchDests] = useState("");
+  const [batchResults, setBatchResults] = useState([]);
+  const [batchLoading, setBatchLoading] = useState(false);
+  const [batchProgress, setBatchProgress] = useState(0);
 
   const toggleFormat = (fmt) => {
     setActiveFormats((prev) =>
@@ -63,7 +68,7 @@ export default function App() {
         body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: prompt }], max_tokens: 2000 }),
       });
       const data = await res.json();
-      const text = data.content ? data.content.map(function(b) { return b.text || ""; }).join("") : "";
+      const text = data.content ? data.content.filter(function(b) { return b.type === "text"; }).map(function(b) { return b.text || ""; }).join("") : "";
       setStep(3); setLoadingText(msgs[3]);
       await delay(400);
 
@@ -92,7 +97,7 @@ export default function App() {
   const getScore = async () => {
     if (Object.keys(results).length === 0) return;
     const lines = Object.entries(results).map(function(entry) { return "【" + entry[1].label + "】\n" + entry[1].content.slice(0, 200); }).join("\n\n");
-    const scorePrompt = "请对以下旅游文案逐一评分（满分10分），并给出1条优化建议。\n每个文案用以下格式输出，不要有其他内容：\n文案名称|分数|优化建议\n\n例如：\n官网详情页|8|建议加入具体价格区间\n小红书种草帖|9|可以加入更多互动问题\n\n文案内容：\n" + lines;
+    const scorePrompt = "请对以下旅游文案逐一评分（满分10分），并给出1条优化建议。\n每个文案用以下格式输出，不要有其他内容：\n文案名称|分数|建议\n\n例如：\n官网详情页|8|建议加入具体价格区间\n\n文案内容：\n" + lines;
     try {
       const r = await fetch(BASE_URL + "/v1/messages", {
         method: "POST",
@@ -100,7 +105,7 @@ export default function App() {
         body: JSON.stringify({ model: MODEL, max_tokens: 1024, messages: [{ role: "user", content: scorePrompt }] }),
       });
       const d = await r.json();
-      const text = d.content ? d.content.map(function(b) { return b.text || ""; }).join("") : "";
+      const text = d.content ? d.content.filter(function(b) { return b.type === "text"; }).map(function(b) { return b.text || ""; }).join("") : "";
       const scoreMap = {};
       const keyMap = { "官网详情页": "official", "小红书种草帖": "xiaohongshu", "短视频解说脚本": "video", "SEO分析": "seo" };
       text.split("\n").forEach(function(line) {
@@ -114,11 +119,59 @@ export default function App() {
     } catch (e) { console.log("评分错误", e); }
   };
 
+  const batchGenerate = async () => {
+    const dests = batchDests.split("\n").map(function(d) { return d.trim(); }).filter(function(d) { return d.length > 0; });
+    if (dests.length === 0) return;
+    setBatchLoading(true);
+    setBatchResults([]);
+    setBatchProgress(0);
+    for (let i = 0; i < dests.length; i++) {
+      const currentDest = dests[i];
+      const prompt = "你是专业旅游内容创作AI，请为目的地\"" + currentDest + "\"生成内容，目标受众是" + AUDIENCE_MAP[audience] + "，主推" + SEASON_MAP[season] + "出行。" + (customPrompt ? "\n\n额外要求：" + customPrompt : "") + "\n\n每个内容块用\"===内容名称===\" 作为开头：\n\n【官网详情页】：300字左右，包含核心吸引力、特色体验\n\n【小红书种草帖】：200字左右，带emoji，口语化";
+      try {
+        const res = await fetch(BASE_URL + "/v1/messages", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "api-key": API_KEY, "anthropic-version": "2023-06-01" },
+          body: JSON.stringify({ model: MODEL, messages: [{ role: "user", content: prompt }], max_tokens: 1500 }),
+        });
+        const data = await res.json();
+        const text = data.content ? data.content.filter(function(b) { return b.type === "text"; }).map(function(b) { return b.text || ""; }).join("") : "";
+        const sectionMap = { "官网详情页": "official", "小红书种草帖": "xiaohongshu" };
+        const parts = text.split(/===([^=]+)===/);
+        const parsed = {};
+        for (let j = 1; j < parts.length - 1; j += 2) {
+          const name = parts[j].trim();
+          const content = parts[j + 1].trim();
+          const key = sectionMap[name] || name;
+          parsed[key] = { label: name, content };
+        }
+        if (Object.keys(parsed).length === 0) parsed["official"] = { label: "生成结果", content: text };
+        setBatchResults(function(prev) { return [...prev, { dest: currentDest, results: parsed, time: new Date().toLocaleString("zh-CN") }]; });
+      } catch (e) {
+        setBatchResults(function(prev) { return [...prev, { dest: currentDest, results: { error: { label: "错误", content: "生成失败" } }, time: new Date().toLocaleString("zh-CN") }]; });
+      }
+      setBatchProgress(i + 1);
+    }
+    setBatchLoading(false);
+  };
+
+  const exportBatch = () => {
+    if (batchResults.length === 0) return;
+    const content = batchResults.map(function(item) {
+      return "📍 " + item.dest + "\n" + "=".repeat(40) + "\n\n" + Object.entries(item.results).map(function(entry) { return "【" + entry[1].label + "】\n\n" + entry[1].content; }).join("\n\n" + "-".repeat(30) + "\n\n");
+    }).join("\n\n" + "=".repeat(60) + "\n\n");
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "批量旅游内容.txt"; a.click();
+    URL.revokeObjectURL(url);
+  };
+
   const copyText = () => { if (results[activeTab]) navigator.clipboard.writeText(results[activeTab].content); };
 
   const exportTxt = () => {
     if (!activeTab || !results[activeTab]) return;
-    const content = Object.entries(results).map(([, v]) => "【" + v.label + "】\n\n" + v.content).join("\n\n" + "=".repeat(40) + "\n\n");
+    const content = Object.entries(results).map(function(entry) { return "【" + entry[1].label + "】\n\n" + entry[1].content; }).join("\n\n" + "=".repeat(40) + "\n\n");
     const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -128,7 +181,7 @@ export default function App() {
 
   const exportWord = () => {
     if (!results[activeTab]) return;
-    const content = Object.entries(results).map(([, v]) => "<h2>" + v.label + "</h2><p>" + v.content.replace(/\n/g, "</p><p>") + "</p>").join("<hr/>");
+    const content = Object.entries(results).map(function(entry) { return "<h2>" + entry[1].label + "</h2><p>" + entry[1].content.replace(/\n/g, "</p><p>") + "</p>"; }).join("<hr/>");
     const html = "<html><head><meta charset='utf-8'><title>旅游内容</title></head><body>" + content + "</body></html>";
     const blob = new Blob([html], { type: "application/msword" });
     const url = URL.createObjectURL(blob);
@@ -143,9 +196,14 @@ export default function App() {
     <div style={{ maxWidth: 700, margin: "40px auto", padding: "0 20px", fontFamily: "sans-serif" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
         <h2 style={{ fontSize: 22, fontWeight: 500 }}>旅游 AI 内容生成器</h2>
-        <button onClick={() => setShowHistory(!showHistory)} style={{ padding: "6px 14px", fontSize: 13, border: "1px solid #ddd", borderRadius: 8, cursor: "pointer", background: showHistory ? "#e8f0fe" : "#f5f5f5", color: showHistory ? "#1a73e8" : "#666" }}>
-          📋 历史记录 {history.length > 0 && "(" + history.length + ")"}
-        </button>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button onClick={() => setBatchMode(!batchMode)} style={{ padding: "6px 14px", fontSize: 13, border: "1px solid #ddd", borderRadius: 8, cursor: "pointer", background: batchMode ? "#e8f0fe" : "#f5f5f5", color: batchMode ? "#1a73e8" : "#666" }}>
+            {batchMode ? "✕ 退出批量" : "⚡ 批量生成"}
+          </button>
+          <button onClick={() => setShowHistory(!showHistory)} style={{ padding: "6px 14px", fontSize: 13, border: "1px solid #ddd", borderRadius: 8, cursor: "pointer", background: showHistory ? "#e8f0fe" : "#f5f5f5", color: showHistory ? "#1a73e8" : "#666" }}>
+            📋 历史记录 {history.length > 0 && "(" + history.length + ")"}
+          </button>
+        </div>
       </div>
       <p style={{ color: "#888", fontSize: 13, marginBottom: 24 }}>多 Agent 协作 · 自动适配平台格式 · SEO 优化</p>
 
@@ -230,15 +288,48 @@ export default function App() {
               <div style={{ marginTop: 16, padding: 12, background: "#f8f9fa", borderRadius: 8, border: "1px solid #e5e5e5" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
                   <span style={{ fontSize: 13, color: "#666" }}>AI 评分</span>
-                  <span style={{ fontSize: 22, fontWeight: 500, color: scores[activeTab].score >= 8 ? "#137333" : scores[activeTab].score >= 6 ? "#b45309" : "#c0392b" }}>
-                    {scores[activeTab].score}
-                  </span>
+                  <span style={{ fontSize: 22, fontWeight: 500, color: scores[activeTab].score >= 8 ? "#137333" : scores[activeTab].score >= 6 ? "#b45309" : "#c0392b" }}>{scores[activeTab].score}</span>
                   <span style={{ fontSize: 13, color: "#aaa" }}>/10</span>
                 </div>
                 <div style={{ fontSize: 13, color: "#555" }}>💡 优化建议：{scores[activeTab].tip}</div>
               </div>
             )}
           </div>
+        </div>
+      )}
+
+      {batchMode && (
+        <div style={{ border: "1px solid #e5e5e5", borderRadius: 12, padding: 20, marginBottom: 16, marginTop: 16 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 500, marginBottom: 12 }}>⚡ 批量生成</h3>
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ fontSize: 12, color: "#888", display: "block", marginBottom: 6 }}>输入多个目的地（每行一个）</label>
+            <textarea value={batchDests} onChange={(e) => setBatchDests(e.target.value)} placeholder={"云南大理\n三亚\n西藏拉萨\n杭州西湖"} rows={5} style={{ width: "100%", padding: "8px 10px", border: "1px solid #ddd", borderRadius: 8, fontSize: 14, resize: "vertical", fontFamily: "sans-serif", boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <button onClick={batchGenerate} disabled={batchLoading} style={{ flex: 1, padding: 10, borderRadius: 8, border: "1px solid #ddd", fontSize: 14, fontWeight: 500, cursor: batchLoading ? "not-allowed" : "pointer", background: batchLoading ? "#f5f5f5" : "#fff", color: batchLoading ? "#aaa" : "#333" }}>
+              {batchLoading ? "生成中 " + batchProgress + "/" + batchDests.split("\n").filter(function(d) { return d.trim(); }).length + "..." : "⚡ 开始批量生成"}
+            </button>
+            {batchResults.length > 0 && (
+              <button onClick={exportBatch} style={{ padding: "10px 16px", borderRadius: 8, border: "1px solid #ddd", fontSize: 14, cursor: "pointer", background: "#f5f5f5" }}>导出全部</button>
+            )}
+          </div>
+          {batchResults.length > 0 && (
+            <div>
+              {batchResults.map(function(item, idx) {
+                return (
+                  <div key={idx} style={{ border: "1px solid #e5e5e5", borderRadius: 10, padding: 14, marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <span style={{ fontWeight: 500 }}>📍 {item.dest}</span>
+                      <button onClick={() => { setResults(item.results); setActiveTab(Object.keys(item.results)[0]); setBatchMode(false); }} style={{ padding: "4px 10px", fontSize: 12, border: "1px solid #ddd", borderRadius: 6, cursor: "pointer", background: "#e8f0fe", color: "#1a73e8" }}>查看详情</button>
+                    </div>
+                    <div style={{ fontSize: 13, color: "#555", lineHeight: 1.6 }}>
+                      {Object.values(item.results)[0] && Object.values(item.results)[0].content.slice(0, 80) + "..."}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
       )}
 
