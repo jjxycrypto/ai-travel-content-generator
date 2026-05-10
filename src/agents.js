@@ -262,12 +262,7 @@ export async function runPipeline(config, onStepChange, onChunk) {
     const messages = buildMsgs(agentCtx);
 
     // Override system prompt if customized
-    if (agentConfig.systemPrompt && builtIn) {
-      // Prepend system message with custom prompt
-      messages.unshift({ role: "system", content: agentConfig.systemPrompt });
-    } else if (agentConfig.systemPrompt) {
-      messages.unshift({ role: "system", content: agentConfig.systemPrompt });
-    }
+    const systemPrompt = agentConfig.systemPrompt || null;
 
     const maxTokens = agentConfig.maxTokens || (builtIn ? builtIn.maxTokens : 1500) || 1500;
 
@@ -275,7 +270,7 @@ export async function runPipeline(config, onStepChange, onChunk) {
     const currentStep = stepIdx;
     try {
       rawText = await callAPIStreaming(
-        { model: MODEL, messages, max_tokens: maxTokens },
+        { model: MODEL, messages, max_tokens: maxTokens, ...(systemPrompt && { system: systemPrompt }) },
         (chunk) => onChunk(currentStep, chunk)
       );
     } catch (err) {
